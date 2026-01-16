@@ -4,7 +4,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
     /// 生成結果の 1 ファイル分の出力。
     /// Output for a single generated file.
     /// </summary>
-    internal sealed class GeneratedFile
+    public sealed class GeneratedFile
     {
         /// <summary>
         /// 出力するファイル名（パスなし）。
