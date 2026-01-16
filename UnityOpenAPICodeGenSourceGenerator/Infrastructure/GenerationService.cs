@@ -13,7 +13,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
     /// API クライアント生成の共通エントリポイント。
     /// Shared entry point for API client generation.
     /// </summary>
-    internal sealed class GenerationService
+    public sealed class GenerationService
     {
         /// <summary>
         /// OpenAPI JSON からクライアントコードを生成する。
@@ -115,7 +115,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
 
             if (operation.RequestBody is not null)
             {
-                    var bodySchema = GetRequestBodySchema(operation.RequestBody, option);
+                var bodySchema = GetRequestBodySchema(operation.RequestBody, option);
                 if (bodySchema is not null)
                 {
                     var bodyName = EnsureUniqueName("body", usedParamNames);
