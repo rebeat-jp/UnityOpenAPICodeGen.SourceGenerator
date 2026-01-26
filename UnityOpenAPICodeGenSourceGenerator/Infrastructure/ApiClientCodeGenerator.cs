@@ -17,7 +17,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         /// 解析失敗時の診断情報。
         /// Diagnostic descriptor for parse failures.
         /// </summary>
-        private static readonly DiagnosticDescriptor OpenApiParseFailed = new DiagnosticDescriptor(
+        private static readonly DiagnosticDescriptor OpenApiParseFailed = new(
             "OACG001",
             "OpenAPI parse failed",
             "Failed to parse OpenAPI document '{0}': {1}",

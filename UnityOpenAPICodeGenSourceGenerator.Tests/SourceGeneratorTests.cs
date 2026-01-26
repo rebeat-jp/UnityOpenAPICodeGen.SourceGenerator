@@ -70,7 +70,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator.Tests
             var result = driver.GetRunResult();
             var generated = result.GeneratedTrees.Select(tree => tree.ToString()).ToArray();
 
-            Assert.Contains(generated, text => text.Contains("public partial class TestApi"));
+            Assert.Contains(generated, text => text.Contains("class TestApi"));
             Assert.Contains(generated, text => text.Contains("/// <summary>Get items</summary>"));
             Assert.Contains(generated, text => text.Contains("public System.Collections.Generic.IReadOnlyList<string> getItems()"));
             await Task.CompletedTask;

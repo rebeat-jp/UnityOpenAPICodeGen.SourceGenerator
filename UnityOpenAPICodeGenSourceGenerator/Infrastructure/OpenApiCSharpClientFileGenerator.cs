@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Json;
 
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -12,154 +10,34 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace ReBeat.OpenApiCodeGen.SourceGenerator
 {
     /// <summary>
-    /// API クライアント生成の共通エントリポイント。
-    /// Shared entry point for API client generation.
+    /// OpenAPI ドキュメントから CSharpFile を生成する。
+    /// Generates CSharpFile from OpenAPI document.
     /// </summary>
-    internal sealed class GenerationService
+    internal sealed class OpenApiCSharpClientFileGenerator : ICSharpFileGenerator<OpenApiDocument>
     {
-        private readonly ICSharpFileGenerator<OpenApiDocument> _openApiFileGenerator;
-        private readonly ICSharpFileGenerator<SwaggerDocument> _swaggerFileGenerator;
-        private readonly ICSharpCodeGenerator _codeGenerator;
-
-        public GenerationService()
-            : this(new OpenApiCSharpClientFileGenerator(), new SwaggerCSharpClientFileGenerator(), new RoslynCodeGenerator())
-        {
-        }
-
-        public GenerationService(
-            ICSharpFileGenerator<OpenApiDocument> openApiFileGenerator,
-            ICSharpFileGenerator<SwaggerDocument> swaggerFileGenerator,
-            ICSharpCodeGenerator codeGenerator)
-        {
-            _openApiFileGenerator = openApiFileGenerator ?? throw new ArgumentNullException(nameof(openApiFileGenerator));
-            _swaggerFileGenerator = swaggerFileGenerator ?? throw new ArgumentNullException(nameof(swaggerFileGenerator));
-            _codeGenerator = codeGenerator ?? throw new ArgumentNullException(nameof(codeGenerator));
-        }
         /// <summary>
-        /// OpenAPI JSON からクライアントコードを生成する。
-        /// Generates client code from OpenAPI JSON.
+        /// OpenAPI と生成オプションから CSharpFile を構築する。
+        /// Builds CSharpFile from OpenAPI document and options.
         /// </summary>
-        public IReadOnlyList<GeneratedFile> GenerateFromOpenApiJson(string json, ApiClientGenerateOption option)
+        public CSharpFile Generate(OpenApiDocument document, ApiClientGenerateOption option)
         {
+            if (document is null)
+            {
+                throw new ArgumentNullException(nameof(document));
+            }
+
             if (option is null)
             {
                 throw new ArgumentNullException(nameof(option));
             }
 
-            var document = JsonApiDocumentParser.Parse(json);
-            var file = _openApiFileGenerator.Generate(document, option);
-            return new[] { _codeGenerator.Generate(file) };
-        }
-
-        /// <summary>
-        /// OpenAPI または Swagger を判別してコード生成し、指定フォルダへ保存する。
-        /// Generates code from OpenAPI/Swagger and saves to the specified folder.
-        /// </summary>
-        public IReadOnlyList<GeneratedFile> GenerateToFolder(string json, ApiClientGenerateOption option, string outputDirectory)
-        {
-            if (option is null)
-            {
-                throw new ArgumentNullException(nameof(option));
-            }
-
-            if (string.IsNullOrWhiteSpace(outputDirectory))
-            {
-                throw new ArgumentException("Output directory is empty.", nameof(outputDirectory));
-            }
-
-            var files = GenerateFromApiDocument(json, option);
-            Directory.CreateDirectory(outputDirectory);
-
-            foreach (var file in files)
-            {
-                var path = Path.Combine(outputDirectory, file.FileName);
-                File.WriteAllText(path, file.Content);
-            }
-
-            return files;
-        }
-
-        /// <summary>
-        /// OpenAPI または Swagger を判別してコード生成する。
-        /// Generates code from OpenAPI or Swagger document.
-        /// </summary>
-        public IReadOnlyList<GeneratedFile> GenerateFromApiDocument(string json, ApiClientGenerateOption option)
-        {
-            if (option is null)
-            {
-                throw new ArgumentNullException(nameof(option));
-            }
-
-            var format = DetectDocumentFormat(json);
-            if (format == ApiDocumentFormat.OpenApi)
-            {
-                var document = JsonApiDocumentParser.Parse(json);
-                var file = _openApiFileGenerator.Generate(document, option);
-                return new[] { _codeGenerator.Generate(file) };
-            }
-
-            if (format == ApiDocumentFormat.Swagger)
-            {
-                var document = new SwaggerApiDocumentParser().Parse(json);
-                var file = _swaggerFileGenerator.Generate(document, option);
-                return new[] { _codeGenerator.Generate(file) };
-            }
-
-            throw new FormatException("Unknown API document format.");
-        }
-
-        /// <summary>
-        /// JSON から OpenAPI/Swagger を判別する。
-        /// Detects document format from JSON.
-        /// </summary>
-        private static ApiDocumentFormat DetectDocumentFormat(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                throw new ArgumentException("API document is empty.", nameof(json));
-            }
-
-            using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-            {
-                throw new FormatException("API document root must be a JSON object.");
-            }
-
-            var root = document.RootElement;
-            if (root.TryGetProperty("openapi", out _))
-            {
-                return ApiDocumentFormat.OpenApi;
-            }
-
-            if (root.TryGetProperty("swagger", out _))
-            {
-                return ApiDocumentFormat.Swagger;
-            }
-
-            return ApiDocumentFormat.Unknown;
-        }
-
-        private enum ApiDocumentFormat
-        {
-            Unknown,
-            OpenApi,
-            Swagger
-        }
-
-        /// <summary>
-        /// ドキュメント内の全オペレーションをクライアントクラスとして構築する。
-        /// Builds a client class for all operations in the document.
-        /// </summary>
-        private static string GenerateApiClient(OpenApiDocument document, ApiClientGenerateOption option)
-        {
             var usedNames = new HashSet<string>(StringComparer.Ordinal);
-            var methods = new List<MethodDeclarationSyntax>();
+            var methodMembers = new List<string>();
             var usesCollections = false;
             var usesTasks = false;
             var usesText = false;
             var usesJson = false;
 
-            // オペレーションをメソッド宣言に展開する。
             foreach (var path in document.Paths)
             {
                 foreach (var operation in path.Value.Operations)
@@ -168,78 +46,85 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
                     methodName = SanitizeMethodName(methodName);
                     methodName = EnsureUniqueName(methodName, usedNames);
 
-                    var method = CreateMethod(methodName, path.Key, operation.Key, operation.Value, option,
-                        ref usesCollections, ref usesTasks, ref usesText, ref usesJson);
-                    methods.Add(method);
+                    var method = CreateMethod(
+                        methodName,
+                        path.Key,
+                        operation.Key,
+                        operation.Value,
+                        option,
+                        ref usesCollections,
+                        ref usesTasks,
+                        ref usesText,
+                        ref usesJson);
+
+                    // Roslyn syntax を文字列化して CSharpFile 側のメンバーとして保持する。
+                    methodMembers.Add(method.NormalizeWhitespace().ToFullString());
                 }
             }
 
-            var methodDeclarations = methods.ToArray();
+            var classBuilder = new CSharpSyntaxGenerator(
+                $"{option.ApiName}.g.cs",
+                string.IsNullOrWhiteSpace(option.Namespace)
+                    ? "ReBeat.OpenApiCodeGen.Generated"
+                    : option.Namespace);
 
-            var classDeclaration = SyntaxFactory.ClassDeclaration(option.ApiName)
-                .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword), SyntaxFactory.Token(SyntaxKind.PartialKeyword));
-
+            classBuilder.AddUsing("System");
             if (option.HttpLibraryType == HttpLibrary.HttpClient)
             {
-                var httpClientMembers = HttpClientApiSyntaxGenerator.CreateClientMembers(
-                    option.ApiName,
-                    CreateDocumentationTrivia);
-                classDeclaration = classDeclaration.AddMembers(httpClientMembers);
-            }
-
-            classDeclaration = classDeclaration.AddMembers(methodDeclarations);
-
-            var namespaceDeclaration = SyntaxFactory.NamespaceDeclaration(ParseName(option.Namespace))
-                .AddMembers(classDeclaration);
-
-            var compilationUnit = SyntaxFactory.CompilationUnit()
-                .AddUsings(SyntaxFactory.UsingDirective(ParseName("System")))
-                .AddMembers(namespaceDeclaration);
-
-            if (option.HttpLibraryType == HttpLibrary.HttpClient)
-            {
-                compilationUnit = compilationUnit.AddUsings(
-                    SyntaxFactory.UsingDirective(ParseName("System.Net.Http")));
+                classBuilder.AddUsing("System.Net.Http");
             }
 
             if (usesCollections)
             {
-                // IReadOnlyList を使う場合のみコレクション参照を追加する。
-                compilationUnit = compilationUnit.AddUsings(
-                    SyntaxFactory.UsingDirective(ParseName("System.Collections.Generic")));
+                classBuilder.AddUsing("System.Collections.Generic");
             }
 
             if (usesTasks)
             {
-                compilationUnit = compilationUnit.AddUsings(
-                    SyntaxFactory.UsingDirective(ParseName("System.Threading.Tasks")));
+                classBuilder.AddUsing("System.Threading.Tasks");
             }
 
             if (usesText)
             {
-                compilationUnit = compilationUnit.AddUsings(
-                    SyntaxFactory.UsingDirective(ParseName("System.Text")));
+                classBuilder.AddUsing("System.Text");
             }
 
             if (usesJson)
             {
-                var jsonNamespace = option.JsonLibraryType == JsonLibrary.NewtonsoftJson
+                classBuilder.AddUsing(option.JsonLibraryType == JsonLibrary.NewtonsoftJson
                     ? "Newtonsoft.Json"
-                    : "System.Text.Json";
-                compilationUnit = compilationUnit.AddUsings(
-                    SyntaxFactory.UsingDirective(ParseName(jsonNamespace)));
+                    : "System.Text.Json");
             }
 
-            return compilationUnit.NormalizeWhitespace().ToFullString();
+            classBuilder.AddClass(option.ApiName, builder =>
+            {
+                builder.AddModifiers("public", "partial");
+
+                if (option.HttpLibraryType == HttpLibrary.HttpClient)
+                {
+                    var members = HttpClientApiSyntaxGenerator.CreateClientMembers(
+                        option.ApiName,
+                        CreateDocumentationTrivia);
+                    foreach (var member in members)
+                    {
+                        // HttpClient 用のフィールド/コンストラクタをメンバーとして追加する。
+                        builder.AddMember(member.NormalizeWhitespace().ToFullString());
+                    }
+                }
+
+                foreach (var member in methodMembers)
+                {
+                    builder.AddMember(member);
+                }
+            });
+
+            return classBuilder.Build();
         }
 
-        private static NameSyntax ParseName(string name)
-        {
-            return SyntaxFactory.ParseName(string.IsNullOrWhiteSpace(name)
-                ? "ReBeat.OpenApiCodeGen.Generated"
-                : name);
-        }
-
+        /// <summary>
+        /// OpenAPI operation からメソッド構文を生成する。
+        /// Builds a method syntax from an OpenAPI operation.
+        /// </summary>
         private static MethodDeclarationSyntax CreateMethod(
             string methodName,
             string path,
@@ -251,7 +136,6 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             ref bool usesText,
             ref bool usesJson)
         {
-            // parameters と requestBody を引数として構成する。
             var parameters = new List<ParameterSyntax>();
             var paramDocs = new List<(string Name, string? Summary)>();
             var usedParamNames = new HashSet<string>(StringComparer.Ordinal);
@@ -304,6 +188,7 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
 
             if (isHttpClient)
             {
+                // HttpClient モードでは async Task を返す。
                 usesTasks = true;
                 modifiers.Add(SyntaxFactory.Token(SyntaxKind.AsyncKeyword));
 
@@ -339,6 +224,49 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return method.WithLeadingTrivia(CreateDocumentationTrivia(operation, paramDocs, returnSchema is not null));
         }
 
+        /// <summary>
+        /// OpenAPI operation の XML ドキュメントコメントを生成する。
+        /// Creates XML doc comments for an operation.
+        /// </summary>
+        private static SyntaxTriviaList CreateDocumentationTrivia(
+            OpenApiOperation operation,
+            IReadOnlyList<(string Name, string? Summary)> parameters,
+            bool hasReturn)
+        {
+            var summary = operation.Summary;
+            string operationId = operation.OperationId ?? string.Empty;
+
+            var summaryText = summary ?? operationId;
+            if (string.IsNullOrWhiteSpace(summaryText))
+            {
+                summaryText = "Operation";
+            }
+
+            var xml = "/// <summary>" + EscapeXml(summaryText) + "</summary>\n";
+            if (!string.IsNullOrWhiteSpace(summary) && !string.IsNullOrWhiteSpace(operationId))
+            {
+                xml += "/// <remarks>operationId: " + EscapeXml(operationId) + "</remarks>\n";
+            }
+
+            foreach (var parameter in parameters)
+            {
+                xml += "/// <param name=\"" + EscapeXml(parameter.Name) + "\">";
+                xml += EscapeXml(parameter.Summary ?? parameter.Name);
+                xml += "</param>\n";
+            }
+
+            if (hasReturn)
+            {
+                xml += "/// <returns>Response</returns>\n";
+            }
+
+            return SyntaxFactory.ParseLeadingTrivia(xml);
+        }
+
+        /// <summary>
+        /// 汎用の XML ドキュメントコメントを生成する。
+        /// Creates XML doc comments for a generic summary.
+        /// </summary>
         private static SyntaxTriviaList CreateDocumentationTrivia(
             string summary,
             IReadOnlyList<(string Name, string? Summary)> parameters,
@@ -361,50 +289,6 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return SyntaxFactory.ParseLeadingTrivia(xml);
         }
 
-        /// <summary>
-        /// オペレーション用の XML ドキュメントコメントを作成する。
-        /// Creates XML documentation for an operation.
-        /// </summary>
-        private static SyntaxTriviaList CreateDocumentationTrivia(
-            OpenApiOperation operation,
-            IReadOnlyList<(string Name, string? Summary)> parameters,
-            bool hasReturn)
-        {
-            var summary = operation.Summary;
-            var operationId = operation.OperationId ?? string.Empty;
-
-            var summaryText = summary ?? operationId;
-            if (string.IsNullOrWhiteSpace(summaryText))
-            {
-                summaryText = "Operation";
-            }
-
-            var xml = "/// <summary>" + EscapeXml(summaryText) + "</summary>\n";
-
-            if (!string.IsNullOrWhiteSpace(summary) && !string.IsNullOrWhiteSpace(operationId))
-            {
-                xml += "/// <remarks>operationId: " + EscapeXml(operationId) + "</remarks>\n";
-            }
-
-            foreach (var parameter in parameters)
-            {
-                xml += "/// <param name=\"" + EscapeXml(parameter.Name) + "\">";
-                xml += EscapeXml(parameter.Summary ?? parameter.Name);
-                xml += "</param>\n";
-            }
-
-            if (hasReturn)
-            {
-                xml += "/// <returns>Response</returns>\n";
-            }
-
-            return SyntaxFactory.ParseLeadingTrivia(xml);
-        }
-
-        /// <summary>
-        /// XML ドキュメント用に文字列をエスケープする。
-        /// Escapes XML characters for doc comments.
-        /// </summary>
         private static string EscapeXml(string value)
         {
             return value.Replace("&", "&amp;")
@@ -414,6 +298,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
                 .Replace("'", "&apos;");
         }
 
+        /// <summary>
+        /// requestBody から優先 schema を取得する。
+        /// Picks preferred schema from requestBody.
+        /// </summary>
         private static OpenApiSchema? GetRequestBodySchema(OpenApiRequestBody requestBody, ApiClientGenerateOption option)
         {
             if (requestBody.Content.Count == 0)
@@ -430,9 +318,12 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return requestBody.Content.Values.FirstOrDefault()?.Schema;
         }
 
+        /// <summary>
+        /// レスポンス一覧から優先 schema を取得する。
+        /// Picks preferred schema from responses.
+        /// </summary>
         private static OpenApiSchema? GetResponseSchema(IReadOnlyDictionary<string, OpenApiResponse> responses, ApiClientGenerateOption option)
         {
-            // 2xx を優先し、次に default、最後に最初のレスポンスを採用する。
             foreach (var response in responses)
             {
                 if (response.Key.StartsWith("2", StringComparison.Ordinal))
@@ -462,6 +353,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return null;
         }
 
+        /// <summary>
+        /// 単一レスポンスから schema を取得する。
+        /// Gets schema from a response.
+        /// </summary>
         private static OpenApiSchema? GetResponseSchema(OpenApiResponse response, ApiClientGenerateOption option)
         {
             if (response.Content.Count == 0)
@@ -478,11 +373,14 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return response.Content.Values.FirstOrDefault()?.Schema;
         }
 
+        /// <summary>
+        /// OpenAPI schema から CLR 型情報を解決する。
+        /// Resolves CLR type info from schema.
+        /// </summary>
         private static (TypeSyntax Type, bool IsValueType) ResolveTypeInfo(
             OpenApiSchema schema,
             ref bool usesCollections)
         {
-            // contentSchema がある場合はそれを優先する。
             if (schema.ContentSchema is not null)
             {
                 return ResolveTypeInfo(schema.ContentSchema, ref usesCollections);
@@ -544,8 +442,8 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         }
 
         /// <summary>
-        /// 合成スキーマを単一の CLR 型へ解決できるか試みる。
-        /// Attempts to resolve a composite schema to a single CLR type.
+        /// 合成スキーマを単一 CLR 型へ解決する。
+        /// Resolves composite schema to a single CLR type.
         /// </summary>
         private static (TypeSyntax Type, bool IsValueType)? ResolveCompositeType(OpenApiSchema schema)
         {
@@ -587,8 +485,8 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         }
 
         /// <summary>
-        /// プリミティブ型を CLR 型へマップする。
-        /// Maps primitive types to CLR types.
+        /// プリミティブ型を CLR 型へマッピングする。
+        /// Maps primitive type to CLR type.
         /// </summary>
         private static TypeSyntax MapPrimitiveType(string type, string? format)
         {
@@ -618,8 +516,8 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         }
 
         /// <summary>
-        /// 型名が値型かどうかを判定する。
-        /// Checks if the CLR type name represents a value type.
+        /// CLR 型名が値型かどうか判定する。
+        /// Checks whether type name is a value type.
         /// </summary>
         private static bool IsValueTypeName(string typeName)
         {
@@ -640,6 +538,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
                    typeName == "System.TimeSpan";
         }
 
+        /// <summary>
+        /// 必須/Nullable 設定に応じて null 許容を付与する。
+        /// Applies nullability based on requirements.
+        /// </summary>
         private static TypeSyntax ApplyNullability(TypeSyntax type, bool required, bool isValueType, ApiClientGenerateOption option)
         {
             if (required || !option.UseNullableReferenceTypes)
@@ -650,6 +552,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return SyntaxFactory.NullableType(type);
         }
 
+        /// <summary>
+        /// 名前の重複を避けるためにユニーク化する。
+        /// Ensures a unique name.
+        /// </summary>
         private static string EnsureUniqueName(string methodName, HashSet<string> usedNames)
         {
             if (usedNames.Add(methodName))
@@ -668,6 +574,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return candidate;
         }
 
+        /// <summary>
+        /// メソッド名を識別子として有効な形式に整形する。
+        /// Sanitizes a method name for identifier.
+        /// </summary>
         private static string SanitizeMethodName(string name)
         {
             if (string.IsNullOrWhiteSpace(name))
@@ -710,6 +620,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return builder.ToString();
         }
 
+        /// <summary>
+        /// パラメータ名を識別子として有効な形式に整形する。
+        /// Sanitizes a parameter name for identifier.
+        /// </summary>
         private static string SanitizeParameterName(string name)
         {
             var sanitized = SanitizeMethodName(name);
@@ -721,6 +635,10 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
             return sanitized;
         }
 
+        /// <summary>
+        /// 優先順位に従って media type を選択する。
+        /// Chooses preferred media type by priority.
+        /// </summary>
         private static string? FindPreferredMediaType(IEnumerable<string> available, ApiClientGenerateOption option)
         {
             foreach (var preferred in option.MediaTypePriority)
@@ -754,8 +672,8 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         }
 
         /// <summary>
-        /// string の format/content を CLR 型へマップする。
-        /// Maps string schema with format/content metadata to CLR types.
+        /// string 型スキーマの format/content を CLR 型へマッピングする。
+        /// Maps string schema with format/content to CLR type.
         /// </summary>
         private static (TypeSyntax Type, bool IsValueType) MapStringType(OpenApiSchema schema)
         {
@@ -782,8 +700,8 @@ namespace ReBeat.OpenApiCodeGen.SourceGenerator
         }
 
         /// <summary>
-        /// string の format を CLR 型へマップする。
-        /// Maps string formats to CLR types.
+        /// string format を CLR 型へマッピングする。
+        /// Maps string format to CLR type.
         /// </summary>
         private static (TypeSyntax Type, bool IsValueType) MapStringFormat(string? format)
         {
